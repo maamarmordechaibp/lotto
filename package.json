@@ -1,0 +1,22 @@
+{
+  "name": "voice-first-lottery-platform",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Voice-First Lottery Platform — SignalWire voice + web, Supabase backend, Sola Payments",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "test": "npm run test:functions && npm run test:frontend",
+    "test:functions": "deno test --allow-all supabase/functions/tests/ tests/",
+    "test:frontend": "npm --prefix frontend run test",
+    "db:reset": "supabase db reset",
+    "functions:serve": "supabase functions serve --env-file ./supabase/functions/.env"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
