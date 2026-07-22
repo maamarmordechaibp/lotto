@@ -3,12 +3,9 @@
   "version": "2.0.0",
   "private": true,
   "description": "Voice-First Lottery Platform — SignalWire voice + web, Supabase backend, Sola Payments",
-  "workspaces": [
-    "frontend"
-  ],
   "scripts": {
     "dev": "npm --prefix frontend run dev",
-    "build": "npm --prefix frontend run build",
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
     "lint": "npm --prefix frontend run lint",
     "test": "npm run test:functions && npm run test:frontend",
     "test:functions": "deno test --allow-all supabase/functions/tests/ tests/",
