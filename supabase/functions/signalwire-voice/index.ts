@@ -192,7 +192,7 @@ Deno.serve(async (req) => {
 
     case "exp": {
       await setStash(client, callSid, { card: digits });
-      b.gather({ action: stepUrl("cvv"), numDigits: 4, timeout: 12 }, (g) =>
+      b.gather({ action: stepUrl("cvv"), numDigits: 4, timeout: 25 }, (g) =>
         g.say("Enter your card expiration as four digits. For example, for December 2030, enter 1 2 3 0."));
       b.redirect(stepUrl("goodbye"));
       return b.toResponse();
@@ -201,9 +201,9 @@ Deno.serve(async (req) => {
     case "cvv": {
       await setStash(client, callSid, { exp: digits });
       // 3-digit CVV auto-submits (no pound needed) so the call reliably
-      // reaches the payment step.
-      b.gather({ action: stepUrl("process"), numDigits: 3, timeout: 12 }, (g) =>
-        g.say("Finally, enter your three digit card security code."));
+      // reaches the payment step. Generous timeout so callers have time.
+      b.gather({ action: stepUrl("process"), numDigits: 3, timeout: 25 }, (g) =>
+        g.say("Last step. Enter the three digit security code from the back of your card now."));
       b.redirect(stepUrl("goodbye"));
       return b.toResponse();
     }
