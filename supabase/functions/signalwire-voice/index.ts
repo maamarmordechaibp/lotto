@@ -179,25 +179,31 @@ Deno.serve(async (req) => {
         first_name: firstName || "Phone",
         last_name: rest.join(" ") || "Caller",
       });
-      b.say("Thank you.");
-      b.gather({ action: stepUrl("exp"), numDigits: 19, finishOnKey: "#", timeout: 15 }, (g) =>
-        g.say("Please enter your card number, then press pound."));
+      b.say(
+        `Thank you. You are entering the ${lottery.name} raffle. You will be charged a random ` +
+          `amount between ${lottery.min_charge} and ${lottery.max_charge} dollars, and that exact ` +
+          `amount becomes your raffle ticket number.`,
+      );
+      b.gather({ action: stepUrl("exp"), numDigits: 19, finishOnKey: "#", timeout: 20 }, (g) =>
+        g.say("Please enter your card number, followed by the pound key."));
       b.redirect(stepUrl("goodbye"));
       return b.toResponse();
     }
 
     case "exp": {
       await setStash(client, callSid, { card: digits });
-      b.gather({ action: stepUrl("cvv"), numDigits: 4, timeout: 10 }, (g) =>
-        g.say("Enter your card expiration as four digits, month month year year."));
+      b.gather({ action: stepUrl("cvv"), numDigits: 4, timeout: 12 }, (g) =>
+        g.say("Enter your card expiration as four digits. For example, for December 2030, enter 1 2 3 0."));
       b.redirect(stepUrl("goodbye"));
       return b.toResponse();
     }
 
     case "cvv": {
       await setStash(client, callSid, { exp: digits });
-      b.gather({ action: stepUrl("process"), numDigits: 4, finishOnKey: "#", timeout: 10 }, (g) =>
-        g.say("Enter your card security code, then press pound."));
+      // 3-digit CVV auto-submits (no pound needed) so the call reliably
+      // reaches the payment step.
+      b.gather({ action: stepUrl("process"), numDigits: 3, timeout: 12 }, (g) =>
+        g.say("Finally, enter your three digit card security code."));
       b.redirect(stepUrl("goodbye"));
       return b.toResponse();
     }
