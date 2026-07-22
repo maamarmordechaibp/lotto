@@ -13,8 +13,9 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
-// Default TTS voice (male). Override per-call via say({ voice }).
-const DEFAULT_VOICE = "en-US-Neural2-D";
+// Default TTS voice (male). SignalWire honors Amazon Polly voice names
+// reliably; bare Google names can fall back to a default female voice.
+const DEFAULT_VOICE = "Polly.Matthew";
 const DEFAULT_LANGUAGE = "en-US";
 
 interface GatherOptions {

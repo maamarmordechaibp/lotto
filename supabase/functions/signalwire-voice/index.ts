@@ -83,7 +83,8 @@ Deno.serve(async (req) => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
-  const url = new URL(req.url);
+  try {
+    const url = new URL(req.url);
   const step = url.searchParams.get("step") ?? "welcome";
   const attempts = Number(url.searchParams.get("attempts") ?? "0");
   const client = getAdminClient();
@@ -207,6 +208,8 @@ Deno.serve(async (req) => {
       const gateway = getPaymentGateway();
 
       // Authorize the range MAX, then SCRUB card data immediately.
+      // Any gateway error is caught here so the call ends gracefully
+      // (an unhandled throw would 500 and SignalWire would drop the call).
       let auth;
       try {
         auth = await gateway.authorize({
@@ -217,15 +220,35 @@ Deno.serve(async (req) => {
           exp: stash.exp ?? "",
           name: `${stash.first_name ?? ""} ${stash.last_name ?? ""}`.trim(),
         });
-      } finally {
-        // Remove card/exp from the transient stash regardless of outcome.
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         await client.from("call_logs").update({
-          events: [{ first_name: stash.first_name, last_name: stash.last_name, scrubbed: "true" }],
+          status: "auth_error",
+          events: [{
+            first_name: stash.first_name, last_name: stash.last_name,
+            stage: "authorize_exception", error: message, scrubbed: "true",
+          }],
         }).eq("call_sid", callSid);
+        b.say("We're sorry, we could not reach our payment system. Please try again later. Goodbye.");
+        b.hangup();
+        return b.toResponse();
       }
 
+      // Scrub card/exp from the transient stash now that auth is done.
+      await client.from("call_logs").update({
+        events: [{
+          first_name: stash.first_name, last_name: stash.last_name,
+          auth_result: auth.approved ? "approved" : "declined",
+          auth_error: auth.errorMessage ?? null, auth_code: auth.errorCode ?? null,
+          ref_num: auth.refNum ?? null, scrubbed: "true",
+        }],
+      }).eq("call_sid", callSid);
+
       if (!auth.approved) {
-        b.say("We could not authorize your card. Please try again later. Goodbye.");
+        b.say(
+          `We could not authorize your card. ${auth.errorMessage ? "" : ""}` +
+            "Please check your card details and try again later. Goodbye.",
+        );
         b.hangup();
         return b.toResponse();
       }
@@ -272,5 +295,12 @@ Deno.serve(async (req) => {
       b.hangup();
       return b.toResponse();
     }
+    }
+  } catch (_err) {
+    // Never 500 to SignalWire (it would drop the call). End gracefully.
+    const fb = new LamlBuilder();
+    fb.say("We're sorry, an unexpected error occurred. Please try again later. Goodbye.");
+    fb.hangup();
+    return fb.toResponse();
   }
 });
