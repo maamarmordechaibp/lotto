@@ -100,6 +100,23 @@ Deno.serve(async (req) => {
   const speechResult = params.SpeechResult ?? "";
   const digits = params.Digits ?? "";
 
+  // Diagnostic trail: record every step invocation + its inputs so we can
+  // see exactly what SignalWire sends on a real call.
+  if (callSid) {
+    await client.from("audit_logs").insert({
+      event: "VOICE_STEP",
+      actor_type: "voice",
+      data: {
+        step,
+        callSid,
+        digits,
+        speech: speechResult,
+        digitsLen: digits.length,
+        allParams: Object.keys(params).join(","),
+      },
+    }).then(() => {}, () => {});
+  }
+
   const lottery = await loadActiveLottery(client);
   const b = new LamlBuilder();
   const stepUrl = (s: string, extra = "") => `${FN_BASE}?step=${s}${extra}`;
