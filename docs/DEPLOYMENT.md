@@ -50,33 +50,32 @@ insert into public.user_roles (user_id, role) values ('<uid>', 'super_admin');
 
 ---
 
-## 2. Frontend — Cloudflare Pages (`lotto.codelabsus.com`)
+## 2. Frontend — Cloudflare (`lotto.codelabsus.com`)
 
-Build settings:
-- **Build command:** `npm install && npm run build`
-- **Build output directory:** `frontend/dist`
-- **Root directory:** `/` (repo root)
+Connect the GitHub repo in the Cloudflare dashboard (**Workers & Pages → Create**).
+Because this is an npm **monorepo**, point Cloudflare at the `frontend` app:
 
-Environment variables (Pages → Settings → Environment):
+- **Root directory:** `frontend`  ← important (avoids the workspace-root deploy error)
+- **Build command:** `npm run build`
+- **Deploy command:** `npx wrangler deploy` (uses `frontend/wrangler.toml`)
+- **Build output:** `dist`
+
+Environment variables (Settings → Variables):
 ```
 VITE_SUPABASE_URL=https://<project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<anon/publishable key>
 VITE_APP_URL=https://lotto.codelabsus.com
+VITE_SOLA_IFIELDS_KEY=<iFields public key>
+VITE_SOLA_IFIELDS_VERSION=2.15.2306071
 ```
 
-### Deploy with Wrangler
-
-```bash
-npm --prefix frontend install
-npm --prefix frontend run build
-npx wrangler pages deploy frontend/dist --project-name lotto
-```
+`frontend/wrangler.toml` serves `dist` as static assets with SPA fallback
+(`not_found_handling = "single-page-application"`).
 
 ### Custom subdomain
 
-Cloudflare → Pages → your project → **Custom domains** → add
-`lotto.codelabsus.com`. Cloudflare auto-creates the CNAME since the zone
-`codelabsus.com` is on the same account.
+Add `lotto.codelabsus.com` under the project's **Custom domains** — Cloudflare
+auto-creates the CNAME since the `codelabsus.com` zone is on the same account.
 
 ---
 
@@ -85,16 +84,18 @@ Cloudflare → Pages → your project → **Custom domains** → add
 | Provider | URL |
 | --- | --- |
 | SignalWire (Voice) | `https://<ref>.supabase.co/functions/v1/signalwire-voice` |
-| Sola (payments) | `https://<ref>.supabase.co/functions/v1/sola-webhook` |
+
+> Sola (Cardknox) has **no card webhooks** — the web + phone flows finalize
+> synchronously. Nothing to configure on Sola's side beyond the API key.
 
 ---
 
 ## 4. Post-deploy checklist
 
 - [ ] `service_role` key set in function secrets (not the `sbp_` token)
-- [ ] Sola in `production` mode with real keys
+- [ ] `SOLA_API_KEY` set; `SOLA_ENVIRONMENT=production` with the live key
+- [ ] `VITE_SOLA_IFIELDS_KEY` set in the frontend build
 - [ ] SignalWire number points to the voice function
-- [ ] Sola webhook secret configured + signature verified
 - [ ] RLS verified (anon cannot read `participants`/`payments`)
 - [ ] First `super_admin` created
 - [ ] Rotate any secrets that were shared in plaintext

@@ -1,83 +1,98 @@
 # Sola Payments Integration
 
-Sola Payments (solapayments.com) is the **default** payment provider. All
-payment logic goes through the [`PaymentGateway`](../supabase/functions/_shared/payment/gateway.ts)
-interface; `SolaPaymentsGateway` is the concrete implementation. Swapping
-providers requires only a new implementation + one line in `factory.ts`.
+Sola runs on the **Cardknox Transaction API** — a synchronous, `xKey`-authenticated
+JSON API. **There are no card webhooks**; every operation returns its result in
+the HTTP response. All payment logic goes through the
+[`PaymentGateway`](../supabase/functions/_shared/payment/gateway.ts) interface;
+`SolaPaymentsGateway` is the concrete implementation. Swapping providers requires
+only a new implementation + one line in `factory.ts`.
 
-## Capabilities
+## Endpoints & auth
 
-| Operation | Method | Notes |
+- **Transaction API:** `POST https://x1.cardknox.com/gatewayjson` (x2/b1 are backups).
+- **Auth:** `xKey` (your account/API key) sent in the request body — server-side only.
+- **CORS:** browser requests are blocked, so all calls run from Edge Functions.
+
+## Commands used
+
+| Operation | `xCommand` | Notes |
 | --- | --- | --- |
-| Create session | `createSession` | Hosted checkout (web) or IVR capture (phone). Pre-auth only. |
-| Authorize | `authorizePayment` | Authorizes the **max** of the range. |
-| Capture | `capturePayment` | Captures the **exact** ticket amount. |
-| Void | `voidPayment` | Used when no ticket can be assigned. |
-| Refund | `refundPayment` | Admin-initiated, full or partial. |
-| Status | `getTransactionStatus` | Reconciliation. |
-| Verify webhook | `verifyWebhookSignature` | HMAC-SHA256, constant-time compare. |
+| Authorize | `cc:authonly` | Authorizes the range **MAX**; returns `xRefNum`. |
+| Capture | `cc:capture` | Captures the **exact** ticket amount (`xAmount`, `xRefNum`). |
+| Void | `cc:void` | Voids the auth when no ticket can be assigned. |
+| Refund | `cc:refund` | Admin refund by `xRefNum`. |
 
-## Auth → Capture → Void flow
+Key response fields: `xResult` (`A`=approved, `D`=declined, `E`=error, `V`=3DS
+challenge), `xRefNum`, `xAuthAmount`, `xToken`, `xError`, `xErrorCode`.
+
+## Web card capture — iFields (client-side tokenization)
+
+The website uses **iFields**: card number + CVV are entered in cross-origin
+iframes served by Cardknox, which return **single-use tokens (SUT)**. Raw PAN/CVV
+never touch our page or server.
+
+- Public **iFields key** (separate from the API key) initializes the script:
+  `VITE_SOLA_IFIELDS_KEY` (see [../frontend/src/lib/ifields.ts](../frontend/src/lib/ifields.ts)).
+- `getTokens()` fills hidden inputs `xCardNum` (card SUT) and `xCVV` (CVV SUT).
+- The frontend posts the SUTs + `exp` (MMYY) to `enter-lottery`, which sends the
+  SUT as `xCardNum` to the Transaction API.
+
+## Synchronous entry flow (web)
 
 ```mermaid
 sequenceDiagram
-  participant U as Entrant
-  participant B as Edge Function
-  participant S as Sola
+  participant U as Browser (iFields)
+  participant B as enter-lottery (Edge)
+  participant S as Sola/Cardknox
   participant DB as Postgres
 
-  U->>B: Enter lottery
-  B->>S: createSession (capture=false)
-  S-->>B: session + hostedUrl
-  U->>S: Pay on hosted page / IVR
-  S-->>B: webhook authorization.succeeded (auth_id)
+  U->>U: iFields getTokens() -> card + cvv SUT
+  U->>B: POST cardToken, cvvToken, exp, entrant info
+  B->>S: cc:authonly (range MAX)
+  S-->>B: xResult=A, xRefNum
   B->>DB: assign_ticket_and_record_payment (SERIALIZABLE)
   alt ticket assigned
-    B->>S: capture(auth_id, EXACT ticket amount)
-    S-->>B: captured
-    B->>U: SMS + email confirmation
+    B->>S: cc:capture (EXACT ticket amount, xRefNum)
+    S-->>B: xResult=A
+    B->>U: { ticketNumber, amountDollars }
   else sold out / failure
-    B->>S: void(auth_id)
+    B->>S: cc:void (xRefNum)
     Note over B,U: Card not charged
   end
 ```
 
-## PCI compliance
+The **phone** flow (`signalwire-voice`) uses the same gateway: card digits are
+collected via DTMF, sent to `cc:authonly`, then the ticket is assigned and the
+exact amount captured — card digits are scrubbed from the transient call log
+immediately after authorization.
 
-- **Web:** users are redirected to Sola's hosted checkout — the site never
-  touches card data.
-- **Phone:** Sola's PCI-compliant IVR/agent-assist captures the card.
-- Tokenization only; raw PAN/CVV are **never** stored. `redact()` strips
-  sensitive fields before any payload is persisted.
+## PCI notes
 
-## Secrets (Edge Function only)
+- **Web:** iFields keeps the site out of PCI scope (no raw card data).
+- **Phone:** DTMF capture is a reference implementation; for production PCI
+  reduction use Sola's PCI IVR / DTMF-suppression product.
+- Responses are redacted before persistence (`redact()` in `sola.ts`); no
+  PAN/CVV is ever stored. Only `xRefNum`/`xToken` are kept.
+
+## Secrets
+
+Server-side (Edge Function secret) — only one is required:
 
 ```
-SOLA_API_KEY
-SOLA_API_SECRET
-SOLA_WEBHOOK_SECRET
-SOLA_MERCHANT_ID
-SOLA_ENVIRONMENT     # sandbox | production
-SOLA_API_BASE_URL
+SOLA_API_KEY          # xKey (account key)
+SOLA_ENVIRONMENT      # sandbox | production
+SOLA_API_BASE_URL     # default https://x1.cardknox.com
 ```
 
-Set them with:
-```bash
-supabase secrets set --env-file ./supabase/functions/.env
+Client-side (public, in the frontend build):
+
+```
+VITE_SOLA_IFIELDS_KEY       # iFields (public) key — NOT the API key
+VITE_SOLA_IFIELDS_VERSION   # from https://cdn.cardknox.com/ifields/versions.htm
 ```
 
-## Webhook setup
+## Sandbox testing
 
-Point Sola webhooks to:
-```
-POST  https://<project-ref>.supabase.co/functions/v1/sola-webhook
-```
-Sola signs the raw body; the function verifies `x-sola-signature`
-(`sha256=<hmac>`) and rejects invalid signatures with `401`. Processing is
-idempotent per `session_id`, and every payload is stored in `webhook_logs`.
-
-## Persisted payment fields
-
-`gateway='sola'`, `gateway_reference`, `status`, `authorized_cents`,
-`amount_cents`, `refunded_cents`, `settlement_status`, redacted `raw_response`,
-timestamps. See `payments` in [SCHEMA.md](SCHEMA.md).
+Test cards (sandbox key): Visa `4444333322221111`, Mastercard `5454545454545454`,
+Amex `370276000431054`. Amount `9.91` forces a decline; `9.92` a gateway error.
+CVV `123`, any future expiry.

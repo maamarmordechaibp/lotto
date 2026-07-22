@@ -3,15 +3,19 @@
 // A LaML state machine driven by ?step=... query params.
 //
 // Flow:
-//   welcome  -> play greeting + lottery info + charge explanation
-//   confirm  -> DTMF 1 = continue, 9 = exit (max 3 invalid retries)
-//   collect  -> capture caller name (speech), phone from caller ID
-//   payment  -> create Sola IVR/agent-assist session + authorize MAX;
-//               (production: transfer to Sola's PCI IVR to capture card)
-//   finalize -> assign ticket + capture EXACT amount + read ticket back
-//   goodbye  -> graceful hangup
+//   welcome   -> greeting + lottery info + charge explanation
+//   confirm   -> DTMF 1 = continue, 9 = exit (max 3 invalid retries)
+//   name      -> capture caller name (speech); phone from caller ID
+//   card      -> DTMF card number (finish with #)
+//   exp       -> DTMF expiration MMYY
+//   cvv       -> DTMF CVV (finish with #), then authorize + finalize
+//   done      -> read ticket number back + hangup
 //
-// Card data is captured by Sola's PCI-compliant IVR — never by us.
+// Card digits are collected via DTMF and sent straight to Sola's
+// Transaction API (cc:authonly). They are held transiently on the
+// call_logs row only across steps and SCRUBBED immediately after the
+// authorization. For maximum PCI reduction, swap DTMF capture for
+// Sola's PCI IVR / DTMF-suppression product in production.
 // ============================================================
 
 import { handlePreflight } from "../_shared/cors.ts";
@@ -37,7 +41,7 @@ async function loadActiveLottery(client: ReturnType<typeof getAdminClient>) {
   return data;
 }
 
-/** Resolve a prompt slot: DB voice_prompts override -> lottery text -> default. */
+/** Resolve a prompt slot: DB voice_prompts override -> fallback text. */
 async function prompt(
   client: ReturnType<typeof getAdminClient>,
   lotteryId: string | null,
@@ -55,6 +59,26 @@ async function prompt(
   return data?.text_content?.trim() || fallback;
 }
 
+/** Read/merge/scrub the transient card+context stash on the call log. */
+async function getStash(
+  client: ReturnType<typeof getAdminClient>,
+  callSid: string,
+): Promise<Record<string, string>> {
+  const { data } = await client.from("call_logs").select("events").eq("call_sid", callSid)
+    .maybeSingle();
+  return (data?.events?.[0] ?? {}) as Record<string, string>;
+}
+
+async function setStash(
+  client: ReturnType<typeof getAdminClient>,
+  callSid: string,
+  patch: Record<string, string>,
+): Promise<void> {
+  const current = await getStash(client, callSid);
+  await client.from("call_logs").update({ events: [{ ...current, ...patch }] })
+    .eq("call_sid", callSid);
+}
+
 Deno.serve(async (req) => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
@@ -64,12 +88,10 @@ Deno.serve(async (req) => {
   const attempts = Number(url.searchParams.get("attempts") ?? "0");
   const client = getAdminClient();
 
-  // Parse SignalWire form-encoded payload + verify signature.
   const form = await req.formData().catch(() => new FormData());
   const params: Record<string, string> = {};
   for (const [k, v] of form.entries()) params[k] = String(v);
   const signature = req.headers.get("x-signalwire-signature");
-  // Signature verification is best-effort in local/dev; enforce in prod.
   await verifySignalWireSignature(req.url, params, signature).catch(() => false);
 
   const callSid = params.CallSid ?? "";
@@ -79,18 +101,14 @@ Deno.serve(async (req) => {
 
   const lottery = await loadActiveLottery(client);
   const b = new LamlBuilder();
+  const stepUrl = (s: string, extra = "") => `${FN_BASE}?step=${s}${extra}`;
 
-  // No active lottery — apologize and hang up.
   if (!lottery) {
     b.say("We're sorry. There are no active lotteries at this time. Goodbye.");
     b.hangup();
     return b.toResponse();
   }
 
-  const step_url = (s: string, extra = "") =>
-    `${FN_BASE}?step=${s}${extra}`;
-
-  // Upsert a call log on first contact.
   if (step === "welcome" && callSid) {
     await client.from("call_logs").upsert({
       call_sid: callSid,
@@ -98,142 +116,130 @@ Deno.serve(async (req) => {
       from_number: fromNumber,
       direction: "inbound",
       status: "in-progress",
+      events: [{}],
     }, { onConflict: "call_sid" });
   }
 
   switch (step) {
     case "welcome": {
-      const greeting = await prompt(
-        client, lottery.id, "welcome_greeting",
-        `Welcome to ${lottery.name}.`,
-      );
+      const greeting = await prompt(client, lottery.id, "welcome_greeting", `Welcome to ${lottery.name}.`);
       const explanation = await prompt(
         client, lottery.id, "lottery_explanation",
-        `The prize is ${lottery.prize_text ?? "a great prize"}. ` +
-          `You will be charged a randomly selected amount between ${lottery.min_charge} ` +
-          `and ${lottery.max_charge} dollars. That amount becomes your ticket number.`,
+        `The prize is ${lottery.prize_text ?? "a great prize"}. You will be charged a randomly ` +
+          `selected amount between ${lottery.min_charge} and ${lottery.max_charge} dollars. ` +
+          `That amount becomes your ticket number.`,
       );
       b.say(greeting);
       b.pause(1);
       b.say(explanation);
-      b.gather({ action: step_url("confirm"), numDigits: 1, timeout: 8 }, (g) => {
+      b.gather({ action: stepUrl("confirm"), numDigits: 1, timeout: 8 }, (g) => {
         g.say("Press 1 to continue, or press 9 to exit.");
       });
-      // No input -> re-prompt.
-      b.redirect(step_url("welcome"));
+      b.redirect(stepUrl("welcome"));
       return b.toResponse();
     }
 
     case "confirm": {
       if (digits === "1") {
-        // Duplicate phone guard.
         if (await isDuplicatePhone(client, lottery.id, fromNumber)) {
           b.say("Our records show you already have an entry in this lottery. Goodbye.");
           b.hangup();
           return b.toResponse();
         }
-        b.gather(
-          { action: step_url("payment"), timeout: 6, finishOnKey: "#" },
-          (g) => g.say("Please say your first and last name after the tone, then press pound."),
-        );
-        b.redirect(step_url("collect", "&attempts=0"));
+        b.gather({ action: stepUrl("card"), timeout: 6, finishOnKey: "#" }, (g) =>
+          g.say("Please say your first and last name, then press pound."));
+        b.redirect(stepUrl("welcome"));
         return b.toResponse();
       }
       if (digits === "9") {
-        b.redirect(step_url("goodbye"));
+        b.redirect(stepUrl("goodbye"));
         return b.toResponse();
       }
-      // Invalid input: re-prompt up to 3 times.
       if (attempts >= 2) {
         b.say("Too many invalid attempts. Goodbye.");
         b.hangup();
         return b.toResponse();
       }
       b.say("Sorry, I didn't get that.");
-      b.gather({ action: step_url("confirm", `&attempts=${attempts + 1}`), numDigits: 1 }, (g) => {
-        g.say("Press 1 to continue, or 9 to exit.");
-      });
-      b.redirect(step_url("confirm", `&attempts=${attempts + 1}`));
+      b.gather({ action: stepUrl("confirm", `&attempts=${attempts + 1}`), numDigits: 1 }, (g) =>
+        g.say("Press 1 to continue, or 9 to exit."));
+      b.redirect(stepUrl("confirm", `&attempts=${attempts + 1}`));
       return b.toResponse();
     }
 
-    case "collect": {
-      // Fallback path when speech capture times out.
-      b.gather(
-        { action: step_url("payment"), timeout: 6, finishOnKey: "#" },
-        (g) => g.say("Please say your first and last name, then press pound."),
-      );
-      b.redirect(step_url("goodbye"));
-      return b.toResponse();
-    }
-
-    case "payment": {
+    case "card": {
+      // Prior step captured the spoken name.
       const fullName = (speechResult || "Phone Caller").trim();
       const [firstName, ...rest] = fullName.split(" ");
-      const lastName = rest.join(" ") || "Caller";
+      await setStash(client, callSid, {
+        first_name: firstName || "Phone",
+        last_name: rest.join(" ") || "Caller",
+      });
+      b.say("Thank you.");
+      b.gather({ action: stepUrl("exp"), numDigits: 19, finishOnKey: "#", timeout: 15 }, (g) =>
+        g.say("Please enter your card number, then press pound."));
+      b.redirect(stepUrl("goodbye"));
+      return b.toResponse();
+    }
 
-      // Create a Sola IVR/agent-assist session + authorize for the MAX amount.
+    case "exp": {
+      await setStash(client, callSid, { card: digits });
+      b.gather({ action: stepUrl("cvv"), numDigits: 4, timeout: 10 }, (g) =>
+        g.say("Enter your card expiration as four digits, month month year year."));
+      b.redirect(stepUrl("goodbye"));
+      return b.toResponse();
+    }
+
+    case "cvv": {
+      await setStash(client, callSid, { exp: digits });
+      b.gather({ action: stepUrl("process"), numDigits: 4, finishOnKey: "#", timeout: 10 }, (g) =>
+        g.say("Enter your card security code, then press pound."));
+      b.redirect(stepUrl("goodbye"));
+      return b.toResponse();
+    }
+
+    case "process": {
+      const stash = await getStash(client, callSid);
+      const cvv = digits;
       const gateway = getPaymentGateway();
+
+      // Authorize the range MAX, then SCRUB card data immediately.
+      let auth;
       try {
-        const session = await gateway.createSession({
-          lotteryId: lottery.id,
-          minAmountCents: lottery.min_charge * 100,
-          maxAmountCents: lottery.max_charge * 100,
-          customerPhone: fromNumber,
-          customerName: fullName,
-          channel: "phone",
-          metadata: { first_name: firstName, last_name: lastName, phone: fromNumber, call_sid: callSid },
+        auth = await gateway.authorize({
+          amountCents: lottery.max_charge * 100,
+          invoice: `${lottery.id.slice(0, 8)}-${callSid.slice(-8)}-${Date.now()}`,
+          cardNumber: stash.card ?? "",
+          cvv,
+          exp: stash.exp ?? "",
+          name: `${stash.first_name ?? ""} ${stash.last_name ?? ""}`.trim(),
         });
-        const auth = await gateway.authorizePayment(session.sessionId, lottery.max_charge * 100);
-
-        if (auth.status !== "authorized") {
-          b.say("We could not authorize a card at this time. Goodbye.");
-          b.hangup();
-          return b.toResponse();
-        }
-
-        // Stash auth context on the call log for the finalize step.
+      } finally {
+        // Remove card/exp from the transient stash regardless of outcome.
         await client.from("call_logs").update({
-          participant_id: null,
-          events: [{
-            session_id: session.sessionId,
-            auth_id: auth.authId,
-            authorized_cents: auth.authorizedCents,
-            first_name: firstName,
-            last_name: lastName,
-          }],
+          events: [{ first_name: stash.first_name, last_name: stash.last_name, scrubbed: "true" }],
         }).eq("call_sid", callSid);
+      }
 
-        b.say("Thank you. Your card has been authorized. Please hold while we assign your ticket.");
-        b.redirect(step_url("finalize"));
-        return b.toResponse();
-      } catch (_err) {
-        b.say("We're sorry, a payment error occurred. Please try again later. Goodbye.");
+      if (!auth.approved) {
+        b.say("We could not authorize your card. Please try again later. Goodbye.");
         b.hangup();
         return b.toResponse();
       }
-    }
-
-    case "finalize": {
-      const { data: log } = await client
-        .from("call_logs").select("events").eq("call_sid", callSid).maybeSingle();
-      const ctx = (log?.events?.[0] ?? {}) as Record<string, unknown>;
-      const gateway = getPaymentGateway();
 
       try {
         const result = await finalizeEntry(client, gateway, {
           lottery,
-          authId: String(ctx.auth_id ?? ""),
-          authorizedCents: Number(ctx.authorized_cents ?? 0),
-          sessionId: String(ctx.session_id ?? ""),
+          refNum: auth.refNum,
+          authorizedCents: auth.authorizedCents,
           channel: "phone",
-          firstName: String(ctx.first_name ?? "Phone"),
-          lastName: String(ctx.last_name ?? "Caller"),
+          firstName: stash.first_name ?? "Phone",
+          lastName: stash.last_name ?? "Caller",
           phone: fromNumber,
+          gatewayRawAuth: auth.raw,
         });
 
-        await client.from("call_logs")
-          .update({ status: "completed" }).eq("call_sid", callSid);
+        await client.from("call_logs").update({ status: "completed" }).eq("call_sid", callSid);
 
         const confirm = await prompt(
           client, lottery.id, "confirmation_message",

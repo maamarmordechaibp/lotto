@@ -3,13 +3,15 @@
 // PaymentGateway interface — every payment operation flows
 // through this abstraction. Providers implement it; business
 // logic never depends on a concrete provider.
+//
+// Model: token-based authorize -> capture -> void/refund
+// (matches Sola/Cardknox and most modern card gateways).
 // ============================================================
 
 import type {
+  AuthorizeParams,
   AuthResult,
   CaptureResult,
-  PaymentSession,
-  PaymentSessionParams,
   RefundResult,
   TransactionStatus,
   VoidResult,
@@ -19,26 +21,31 @@ export interface PaymentGateway {
   /** Human-readable provider name persisted to payments.gateway. */
   readonly name: string;
 
-  /** Create a hosted (web) or phone-entry (voice/IVR) payment session. */
-  createSession(params: PaymentSessionParams): Promise<PaymentSession>;
-
-  /** Authorize a card for `amountCents` (typically the MAX range amount). */
-  authorizePayment(sessionId: string, amountCents: number): Promise<AuthResult>;
+  /**
+   * Authorize a card (iFields SUT or keyed) for `amountCents` — typically the
+   * range MAX. Returns a reference number used for capture/void.
+   */
+  authorize(params: AuthorizeParams): Promise<AuthResult>;
 
   /** Capture EXACTLY `amountCents` (the ticket amount) against an auth. */
-  capturePayment(authId: string, amountCents: number): Promise<CaptureResult>;
-
-  /** Refund `amountCents` from a settled/captured transaction. */
-  refundPayment(transactionId: string, amountCents: number): Promise<RefundResult>;
+  capture(refNum: string, amountCents: number): Promise<CaptureResult>;
 
   /** Void an authorization that was never captured (e.g. no ticket available). */
-  voidPayment(authId: string): Promise<VoidResult>;
+  voidAuth(refNum: string): Promise<VoidResult>;
+
+  /** Refund `amountCents` from a captured/settled transaction. */
+  refund(refNum: string, amountCents: number): Promise<RefundResult>;
 
   /** Fetch the current status of a transaction. */
-  getTransactionStatus(transactionId: string): Promise<TransactionStatus>;
-
-  /** Verify a webhook signature against the raw request body. */
-  verifyWebhookSignature(rawBody: string, signature: string | null): Promise<boolean>;
+  getStatus(refNum: string): Promise<TransactionStatus>;
 }
 
-export type { PaymentSessionParams, PaymentSession, AuthResult, CaptureResult, RefundResult, VoidResult, TransactionStatus };
+export type {
+  AuthorizeParams,
+  AuthResult,
+  CaptureResult,
+  RefundResult,
+  TransactionStatus,
+  VoidResult,
+};
+

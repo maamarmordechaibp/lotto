@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
   const gateway = getPaymentGateway();
   let refund;
   try {
-    refund = await gateway.refundPayment(payment.gateway_reference, amount);
+    refund = await gateway.refund(payment.gateway_reference, amount);
   } catch (err) {
     return errorResponse("REFUND_FAILED", (err as Error).message, 502);
   }

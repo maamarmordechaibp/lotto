@@ -11,10 +11,13 @@ Admin endpoints require a valid user JWT whose account holds the required role.
 
 ---
 
-## POST `/enter-lottery` — Web entry (Step 1)
+## POST `/enter-lottery` — Web entry (synchronous)
 
-Creates a Sola hosted checkout session. The frontend redirects the browser to
-`checkoutUrl`. Ticket assignment + capture happen later via `/sola-webhook`.
+The frontend collects the card with Sola **iFields** (client-side), yielding
+single-use tokens (SUT). It posts those tokens + entrant info here. The backend
+authorizes (`cc:authonly` for the range MAX), assigns an unused ticket, captures
+the **exact** ticket amount (`cc:capture`), voids on failure (`cc:void`), sends
+SMS + email, and returns the ticket — all in one request. **No webhook.**
 
 Request:
 ```json
@@ -24,30 +27,22 @@ Request:
   "lastName": "Doe",
   "phone": "+15555550100",
   "email": "jane@example.com",
-  "address": "optional"
+  "address": "optional",
+  "cardToken": "<iFields SUT for xCardNum>",
+  "cvvToken": "<iFields SUT for xCVV>",
+  "exp": "1230",
+  "zip": "10001"
 }
 ```
 
 Response `200`:
 ```json
-{ "sessionId": "sess_...", "checkoutUrl": "https://checkout.sola...", "expiresAt": "..." }
+{ "ticketNumber": 247, "amountDollars": 247, "refNum": "1234567890" }
 ```
 
 Errors: `VALIDATION_ERROR` (422), `LOTTERY_NOT_FOUND` (404), `LOTTERY_NOT_OPEN` (409),
-`RATE_LIMITED` (429), `DUPLICATE_PHONE` (409), `PAYMENT_SESSION_FAILED` (502).
-
----
-
-## POST `/sola-webhook` — Sola payment webhook
-
-Called by Sola. Verifies the `x-sola-signature` HMAC. On
-`authorization.succeeded` it assigns a ticket, captures the exact ticket
-amount, and sends SMS + email. Idempotent per `session_id`.
-
-Headers: `x-sola-signature: sha256=<hmac>`
-
-Response `200`: `{ "received": true, "ticketNumber": 247 }`
-Errors: `INVALID_SIGNATURE` (401), `BAD_PAYLOAD` (400).
+`RATE_LIMITED` (429), `DUPLICATE_PHONE` (409), `PAYMENT_AUTH_FAILED` (502),
+`PAYMENT_DECLINED` (402), `LOTTERY_SOLD_OUT` (409).
 
 ---
 

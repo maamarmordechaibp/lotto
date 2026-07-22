@@ -62,57 +62,60 @@ export interface EntryInput {
   ipAddress?: string | null;
 }
 
-// -------- PaymentGateway domain types --------
-export interface PaymentSessionParams {
-  lotteryId: string;
-  minAmountCents: number;
-  maxAmountCents: number;
-  customerPhone: string;
-  customerEmail?: string | null;
-  customerName: string;
-  channel: EntryChannel;
-  returnUrl?: string;
-  metadata?: Record<string, string>;
-}
+// -------- PaymentGateway domain types (Sola / Cardknox Transaction API) --------
 
-export interface PaymentSession {
-  sessionId: string;
-  hostedUrl?: string; // web hosted checkout
-  expiresAt?: string;
-  raw: unknown;
+/**
+ * Card reference for an authorization:
+ *  - Web:   iFields single-use tokens (SUT) for cardNumber + cvv.
+ *  - Phone: keyed card entry captured by a PCI-compliant IVR.
+ * The gateway never persists raw PAN/CVV; only the xRefNum/xToken it returns.
+ */
+export interface AuthorizeParams {
+  amountCents: number; // authorize amount (typically the range MAX)
+  invoice: string; // unique per attempt (duplicate protection)
+  cardNumber: string; // iFields SUT (or keyed PAN for IVR)
+  cvv?: string; // iFields SUT (or keyed CVV)
+  exp: string; // MMYY
+  name?: string;
+  email?: string;
+  street?: string;
+  zip?: string;
+  allowDuplicate?: boolean;
 }
 
 export interface AuthResult {
-  authId: string;
-  authorizedCents: number;
-  status: "authorized" | "declined";
+  refNum: string; // xRefNum — used for capture/void/refund
+  authorizedCents: number; // xAuthAmount
+  approved: boolean; // xResult === "A"
+  token?: string; // xToken for card-on-file
+  errorCode?: string;
+  errorMessage?: string;
   raw: unknown;
 }
 
 export interface CaptureResult {
-  transactionId: string;
+  refNum: string;
   capturedCents: number;
-  status: "captured" | "failed";
+  captured: boolean;
   raw: unknown;
 }
 
 export interface RefundResult {
-  refundId: string;
+  refNum: string;
   refundedCents: number;
   status: "refunded" | "partially_refunded" | "failed";
   raw: unknown;
 }
 
 export interface VoidResult {
-  authId: string;
-  status: "voided" | "failed";
+  refNum: string;
+  voided: boolean;
   raw: unknown;
 }
 
 export interface TransactionStatus {
-  transactionId: string;
+  refNum: string;
   status: PaymentStatusValue;
   amountCents: number;
-  settlementStatus?: string;
   raw: unknown;
 }

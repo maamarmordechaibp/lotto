@@ -1,20 +1,25 @@
 // ============================================================
-// enter-lottery — WEB entry flow (Step 1).
-// Creates a Sola hosted checkout session and returns its URL.
-// The frontend redirects the user there (keeping the site out of
-// PCI scope). Ticket assignment + capture happen later in the
-// sola-webhook function on payment success.
+// enter-lottery — WEB entry (synchronous, no webhook).
 //
-// This is the SAME backend API the phone flow builds upon; no
-// ticket numbers or payments are ever computed on the frontend.
+// The frontend collects the card via Sola iFields, which yields
+// single-use tokens (SUT). It posts those tokens + entrant info here.
+// This function then, in one request:
+//   1. Validates the lottery + rate limits + duplicate phone.
+//   2. cc:authonly for the range MAX (Sola/Cardknox Transaction API).
+//   3. Atomically assigns an unused ticket (SERIALIZABLE).
+//   4. Captures EXACTLY the ticket amount; voids the auth on failure.
+//   5. Sends SMS + email and returns the ticket number.
+//
+// Raw card data never reaches this function — only iFields tokens.
+// This is the SAME backend contract the phone flow uses.
 // ============================================================
 
 import { handlePreflight, jsonResponse, errorResponse } from "../_shared/cors.ts";
 import { getAdminClient } from "../_shared/supabase.ts";
 import { getPaymentGateway } from "../_shared/payment/factory.ts";
+import { finalizeEntry, EntryError } from "../_shared/entry-service.ts";
 import { checkRateLimit, isDuplicatePhone } from "../_shared/rate-limit.ts";
 import { writeAudit } from "../_shared/audit.ts";
-import { env } from "../_shared/env.ts";
 import { z } from "zod";
 import type { Lottery } from "../_shared/types.ts";
 
@@ -25,6 +30,11 @@ const EntrySchema = z.object({
   phone: z.string().min(7).max(20),
   email: z.string().email().optional().nullable(),
   address: z.string().max(500).optional().nullable(),
+  // iFields single-use tokens + non-sensitive card metadata.
+  cardToken: z.string().min(1), // SUT for xCardNum
+  cvvToken: z.string().optional(), // SUT for xCVV
+  exp: z.string().regex(/^\d{4}$/, "exp must be MMYY"),
+  zip: z.string().max(10).optional(),
 });
 
 Deno.serve(async (req) => {
@@ -66,54 +76,68 @@ Deno.serve(async (req) => {
     return errorResponse("DUPLICATE_PHONE", "This phone already has an entry", 409);
   }
 
-  // Create Sola hosted checkout session (authorize for the MAX of the range).
   const gateway = getPaymentGateway();
-  const returnUrl = `${env.appUrl()}/confirmation?lottery=${lottery.id}`;
-  let session;
+
+  // 1. Authorize the card for the range MAX (pre-auth).
+  let auth;
   try {
-    session = await gateway.createSession({
-      lotteryId: lottery.id,
-      minAmountCents: lottery.min_charge * 100,
-      maxAmountCents: lottery.max_charge * 100,
-      customerPhone: input.phone,
-      customerEmail: input.email ?? null,
-      customerName: `${input.firstName} ${input.lastName}`,
-      channel: "web",
-      returnUrl,
-      metadata: {
-        first_name: input.firstName,
-        last_name: input.lastName,
-        phone: input.phone,
-        email: input.email ?? "",
-        address: input.address ?? "",
-      },
+    auth = await gateway.authorize({
+      amountCents: lottery.max_charge * 100,
+      invoice: `${lottery.id.slice(0, 8)}-${Date.now()}`,
+      cardNumber: input.cardToken,
+      cvv: input.cvvToken,
+      exp: input.exp,
+      name: `${input.firstName} ${input.lastName}`,
+      email: input.email ?? undefined,
+      zip: input.zip,
     });
   } catch (err) {
-    return errorResponse("PAYMENT_SESSION_FAILED", (err as Error).message, 502);
+    return errorResponse("PAYMENT_AUTH_FAILED", (err as Error).message, 502);
   }
 
-  // Persist a pending payment tied to the session for webhook reconciliation.
-  await client.from("payments").insert({
-    lottery_id: lottery.id,
-    gateway: gateway.name,
-    session_id: session.sessionId,
-    status: "pending",
-    amount_cents: 0,
-    authorized_cents: lottery.max_charge * 100,
-    raw_response: session.raw as Record<string, unknown>,
-  });
+  if (!auth.approved) {
+    await writeAudit(client, {
+      event: "PAYMENT_FAILED",
+      actorType: "web",
+      lotteryId: lottery.id,
+      data: { stage: "authorize", code: auth.errorCode, message: auth.errorMessage },
+      ipAddress: ip,
+    });
+    return errorResponse("PAYMENT_DECLINED", auth.errorMessage ?? "Card was declined", 402);
+  }
 
   await writeAudit(client, {
-    event: "PARTICIPANT_REGISTERED",
+    event: "PAYMENT_AUTHORIZED",
     actorType: "web",
     lotteryId: lottery.id,
-    data: { stage: "session_created", sessionId: session.sessionId, channel: "web" },
+    data: { refNum: auth.refNum, authorizedCents: auth.authorizedCents },
     ipAddress: ip,
   });
 
-  return jsonResponse({
-    sessionId: session.sessionId,
-    checkoutUrl: session.hostedUrl,
-    expiresAt: session.expiresAt,
-  });
+  // 2. Assign ticket + capture exact amount + notify (voids auth on failure).
+  try {
+    const result = await finalizeEntry(client, gateway, {
+      lottery,
+      refNum: auth.refNum,
+      authorizedCents: auth.authorizedCents,
+      channel: "web",
+      firstName: input.firstName,
+      lastName: input.lastName,
+      phone: input.phone,
+      email: input.email ?? null,
+      address: input.address ?? null,
+      ipAddress: ip,
+      gatewayRawAuth: auth.raw,
+    });
+
+    return jsonResponse({
+      ticketNumber: result.ticketNumber,
+      amountDollars: result.amountDollars,
+      refNum: auth.refNum,
+    });
+  } catch (err) {
+    const code = err instanceof EntryError ? err.code : "ENTRY_FAILED";
+    const status = code === "LOTTERY_SOLD_OUT" ? 409 : 400;
+    return errorResponse(code, (err as Error).message, status);
+  }
 });

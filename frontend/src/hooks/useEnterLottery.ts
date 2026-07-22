@@ -3,21 +3,27 @@ import { callFunction } from "@/lib/api";
 import type { EntryFormValues } from "@/schemas/entry";
 
 interface EnterResponse {
-  sessionId: string;
-  checkoutUrl?: string;
-  expiresAt?: string;
+  ticketNumber: number;
+  amountDollars: number;
+  refNum: string;
+}
+
+export interface EnterPayload extends EntryFormValues {
+  lotteryId: string;
+  cardToken: string; // iFields SUT for xCardNum
+  cvvToken?: string; // iFields SUT for xCVV
+  exp: string; // MMYY
+  zip?: string;
 }
 
 /**
- * Web entry: asks the backend to create a Sola hosted checkout session.
- * The component then redirects the browser to `checkoutUrl`. Ticket
- * assignment + capture happen server-side after payment success.
+ * Web entry: submits iFields single-use tokens + entrant info to the
+ * backend, which authorizes, assigns a ticket, and captures the exact
+ * amount synchronously (no webhook). Returns the assigned ticket number.
  */
 export function useEnterLottery() {
   return useMutation({
-    mutationFn: async (
-      input: EntryFormValues & { lotteryId: string },
-    ): Promise<EnterResponse> => {
+    mutationFn: async (input: EnterPayload): Promise<EnterResponse> => {
       return callFunction<EnterResponse>("enter-lottery", {
         lotteryId: input.lotteryId,
         firstName: input.firstName,
@@ -25,6 +31,10 @@ export function useEnterLottery() {
         phone: input.phone,
         email: input.email || null,
         address: input.address || null,
+        cardToken: input.cardToken,
+        cvvToken: input.cvvToken,
+        exp: input.exp,
+        zip: input.zip,
       });
     },
   });

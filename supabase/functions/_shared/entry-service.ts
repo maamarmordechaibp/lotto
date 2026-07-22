@@ -23,9 +23,8 @@ import { env } from "./env.ts";
 
 export interface FinalizeParams {
   lottery: Lottery;
-  authId: string;
+  refNum: string; // gateway auth reference (already authorized)
   authorizedCents: number;
-  sessionId: string;
   channel: EntryChannel;
   firstName: string;
   lastName: string;
@@ -68,9 +67,9 @@ export async function finalizeEntry(
       p_address: params.address ?? null,
       p_channel: params.channel,
       p_gateway: gateway.name,
-      p_gateway_reference: params.authId,
-      p_auth_id: params.authId,
-      p_session_id: params.sessionId,
+      p_gateway_reference: params.refNum,
+      p_auth_id: params.refNum,
+      p_session_id: params.refNum,
       p_authorized_cents: params.authorizedCents,
       p_raw_response: params.gatewayRawAuth ?? {},
     },
@@ -78,12 +77,12 @@ export async function finalizeEntry(
 
   // 2. If assignment failed (sold out / not open), VOID the authorization.
   if (assignErr || !assigned) {
-    await gateway.voidPayment(params.authId).catch(() => {});
+    await gateway.voidAuth(params.refNum).catch(() => {});
     await writeAudit(client, {
       event: "PAYMENT_FAILED",
       actorType: params.channel,
       lotteryId: lottery.id,
-      data: { reason: assignErr?.message ?? "assignment_failed", authId: params.authId },
+      data: { reason: assignErr?.message ?? "assignment_failed", refNum: params.refNum },
       ipAddress: params.ipAddress ?? null,
     });
     throw new EntryError(
@@ -102,14 +101,14 @@ export async function finalizeEntry(
 
   // 3. Capture EXACTLY the ticket amount (not the authorized maximum).
   try {
-    const capture = await gateway.capturePayment(params.authId, ticketAmountCents);
-    if (capture.status !== "captured") throw new Error("capture_declined");
+    const capture = await gateway.capture(params.refNum, ticketAmountCents);
+    if (!capture.captured) throw new Error("capture_declined");
 
     await client
       .from("payments")
       .update({
         status: "captured",
-        gateway_reference: capture.transactionId,
+        gateway_reference: capture.refNum,
         amount_cents: capture.capturedCents,
         raw_response: capture.raw as Record<string, unknown>,
         updated_at: new Date().toISOString(),
@@ -117,7 +116,7 @@ export async function finalizeEntry(
       .eq("id", record.payment_id);
   } catch (captureErr) {
     // Capture failed AFTER assignment: void auth, roll participant back.
-    await gateway.voidPayment(params.authId).catch(() => {});
+    await gateway.voidAuth(params.refNum).catch(() => {});
     await client.from("participants").update({ payment_status: "failed" })
       .eq("id", record.participant_id);
     await client.from("payments").update({
@@ -129,7 +128,7 @@ export async function finalizeEntry(
       actorType: params.channel,
       lotteryId: lottery.id,
       entityId: record.participant_id,
-      data: { stage: "capture", authId: params.authId },
+      data: { stage: "capture", refNum: params.refNum },
     });
     throw new EntryError("CAPTURE_FAILED", "Payment capture failed");
   }
@@ -152,7 +151,7 @@ export async function finalizeEntry(
     lotteryId: lottery.id,
     entityType: "payment",
     entityId: record.payment_id,
-    data: { amountCents: ticketAmountCents, gatewayReference: params.authId },
+    data: { amountCents: ticketAmountCents, gatewayReference: params.refNum },
   });
 
   // 5. Notifications (SMS + Email). Failures are logged, not fatal.

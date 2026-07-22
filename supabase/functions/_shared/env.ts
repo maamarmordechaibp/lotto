@@ -21,13 +21,10 @@ export const env = {
   serviceRoleKey: () => required("SUPABASE_SERVICE_ROLE_KEY"),
   anonKey: () => required("SUPABASE_ANON_KEY"),
 
-  // Sola Payments
+  // Sola Payments (Cardknox Transaction API — only the account key is required)
   solaApiKey: () => required("SOLA_API_KEY"),
-  solaApiSecret: () => required("SOLA_API_SECRET"),
-  solaWebhookSecret: () => required("SOLA_WEBHOOK_SECRET"),
-  solaMerchantId: () => required("SOLA_MERCHANT_ID"),
   solaEnvironment: () => optional("SOLA_ENVIRONMENT", "sandbox"),
-  solaBaseUrl: () => optional("SOLA_API_BASE_URL", "https://api.solapayments.com"),
+  solaBaseUrl: () => optional("SOLA_API_BASE_URL", "https://x1.cardknox.com"),
 
   // SignalWire
   signalwireProjectId: () => required("SIGNALWIRE_PROJECT_ID"),
