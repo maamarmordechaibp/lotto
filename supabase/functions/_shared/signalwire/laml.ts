@@ -13,11 +13,17 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
+// Default TTS voice (male). Override per-call via say({ voice }).
+const DEFAULT_VOICE = "en-US-Neural2-D";
+const DEFAULT_LANGUAGE = "en-US";
+
 interface GatherOptions {
   action: string;
+  input?: "dtmf" | "speech" | "dtmf speech";
   numDigits?: number;
   finishOnKey?: string;
   timeout?: number;
+  speechTimeout?: string; // "auto" or seconds (speech input)
   method?: "POST" | "GET";
 }
 
@@ -25,8 +31,8 @@ export class LamlBuilder {
   private parts: string[] = [];
 
   say(text: string, opts: { voice?: string; language?: string } = {}): this {
-    const voice = opts.voice ?? "en-US-Neural2-C";
-    const language = opts.language ?? "en-US";
+    const voice = opts.voice ?? DEFAULT_VOICE;
+    const language = opts.language ?? DEFAULT_LANGUAGE;
     this.parts.push(
       `<Say voice="${escapeXml(voice)}" language="${escapeXml(language)}">${escapeXml(text)}</Say>`,
     );
@@ -43,15 +49,18 @@ export class LamlBuilder {
     return this;
   }
 
-  /** Collect DTMF input; nested prompts render inside <Gather>. */
+  /** Collect DTMF and/or speech input; nested prompts render inside <Gather>. */
   gather(opts: GatherOptions, build: (inner: LamlBuilder) => void): this {
     const inner = new LamlBuilder();
     build(inner);
+    const input = opts.input ?? "dtmf";
+    const usesSpeech = input.includes("speech");
     const attrs = [
       `action="${escapeXml(opts.action)}"`,
-      `input="dtmf"`,
+      `input="${input}"`,
       opts.numDigits ? `numDigits="${opts.numDigits}"` : "",
       opts.finishOnKey ? `finishOnKey="${escapeXml(opts.finishOnKey)}"` : "",
+      usesSpeech ? `speechTimeout="${escapeXml(opts.speechTimeout ?? "auto")}"` : "",
       `timeout="${opts.timeout ?? 8}"`,
       `method="${opts.method ?? "POST"}"`,
     ].filter(Boolean).join(" ");

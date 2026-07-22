@@ -146,9 +146,12 @@ Deno.serve(async (req) => {
           b.hangup();
           return b.toResponse();
         }
-        b.gather({ action: stepUrl("card"), timeout: 6, finishOnKey: "#" }, (g) =>
-          g.say("Please say your first and last name, then press pound."));
-        b.redirect(stepUrl("welcome"));
+        b.gather(
+          { action: stepUrl("card"), input: "speech", speechTimeout: "auto", timeout: 10 },
+          (g) => g.say("Please say your first and last name."),
+        );
+        // If no speech is captured, continue anyway (name defaults to caller).
+        b.redirect(stepUrl("card"));
         return b.toResponse();
       }
       if (digits === "9") {
