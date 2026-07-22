@@ -66,7 +66,7 @@ VITE_SUPABASE_URL=https://<project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<anon/publishable key>
 VITE_APP_URL=https://lotto.codelabsus.com
 VITE_SOLA_IFIELDS_KEY=<iFields public key>
-VITE_SOLA_IFIELDS_VERSION=2.15.2306071
+VITE_SOLA_IFIELDS_VERSION=3.5.2607.1401
 ```
 
 `frontend/wrangler.toml` serves `dist` as static assets with SPA fallback

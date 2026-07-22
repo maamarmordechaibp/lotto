@@ -11,7 +11,7 @@
 //   VITE_SOLA_IFIELDS_VERSION  — iFields version (see cdn versions page)
 // ============================================================
 
-const VERSION = (import.meta.env.VITE_SOLA_IFIELDS_VERSION as string) || "2.15.2306071";
+const VERSION = (import.meta.env.VITE_SOLA_IFIELDS_VERSION as string) || "3.5.2607.1401";
 const IFIELDS_KEY = import.meta.env.VITE_SOLA_IFIELDS_KEY as string | undefined;
 
 export const IFIELDS_VERSION = VERSION;

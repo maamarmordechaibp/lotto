@@ -88,7 +88,7 @@ Client-side (public, in the frontend build):
 
 ```
 VITE_SOLA_IFIELDS_KEY       # iFields (public) key — NOT the API key
-VITE_SOLA_IFIELDS_VERSION   # from https://cdn.cardknox.com/ifields/versions.htm
+VITE_SOLA_IFIELDS_VERSION   # from https://cdn.cardknox.com/ifields/versions.htm (e.g. 3.5.2607.1401)
 ```
 
 ## Sandbox testing
